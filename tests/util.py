@@ -4,6 +4,9 @@ import bs4
 import textwrap
 import soupsieve as sv
 import pytest
+import os
+import subprocess
+import sys
 
 try:
     from bs4.builder import HTML5TreeBuilder  # noqa: F401
@@ -23,6 +26,18 @@ XHTML = 0x4
 XML = 0x8
 PYHTML = 0x10
 LXML_HTML = 0x20
+
+# Script that compiles the pattern read from stdin in a separate process.
+# It exits successfully only if compiling raises the exception named by the first argument.
+COMPILE_SCRIPT = """\
+import sys
+import soupsieve as sv
+try:
+    sv.compile(sys.stdin.read())
+except getattr(sv, sys.argv[1]):
+    sys.exit(0)
+sys.exit('pattern compiled without raising ' + sys.argv[1])
+"""
 
 
 def skip_no_lxml(func):
@@ -102,6 +117,37 @@ class TestCase(unittest.TestCase):
         print('----Running Assert Test----')
         with self.assertRaises(exception):
             self.compile_pattern(pattern, namespaces=namespace, custom=custom)
+
+    def assert_raises_promptly(self, pattern, exception, timeout=10):
+        """
+        Assert raises within the timeout (fails for the expected error, not a timeout).
+
+        The pattern is first compiled in a separate process that is killed if it exceeds
+        the timeout, so a pattern that causes catastrophic backtracking fails the test
+        instead of hanging it. Unlike `signal.SIGALRM`, this works on all platforms.
+        """
+
+        print('----Running Assert Prompt Test----')
+        env = os.environ.copy()
+        # Make sure the subprocess imports the same Soup Sieve that is being tested.
+        path = os.path.dirname(os.path.dirname(os.path.abspath(sv.__file__)))
+        env['PYTHONPATH'] = os.pathsep.join([path, env['PYTHONPATH']]) if env.get('PYTHONPATH') else path
+        try:
+            proc = subprocess.run(
+                [sys.executable, '-c', COMPILE_SCRIPT, exception.__name__],
+                input=pattern,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                env=env,
+                timeout=timeout
+            )
+        except subprocess.TimeoutExpired:
+            self.fail('Compiling {!r} did not finish within {} seconds'.format(pattern, timeout))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        # Now that compiling is known to finish, check it in this process too.
+        self.assert_raises(pattern, exception)
 
     def assert_selector(self, markup, selectors, expected_ids, namespaces={}, custom=None, flags=0):
         """Assert selector."""
